@@ -27,12 +27,11 @@
         <version>3.0.0.RC1</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
-    <!-- This is a temporary for in the clerezza repository to give things a try,
-    if it turns out to be util it will hopefully make it back to karaf, see CLEREZZA-816    -->
     <groupId>org.wymiwyg.karaf.tooling</groupId>
-    <artifactId>karaf-maven-plugin</artifactId>
+    <artifactId>karaf-sling-maven-plugin</artifactId>
     <packaging>maven-plugin</packaging>
     <name>Apache Karaf :: Tooling :: Maven Karaf Plugin</name>
+    <description>A (hopefully temporary) fork of the karaf plugin that can also create sling launcher partialbundlelists.</description>
 
     <properties>
         <appendedResourcesDirectory>${basedir}/../../etc/appended-resources</appendedResourcesDirectory>
