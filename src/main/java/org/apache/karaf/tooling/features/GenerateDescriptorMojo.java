@@ -18,13 +18,7 @@
 package org.apache.karaf.tooling.features;
 
 import java.io.*;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.jar.JarInputStream;
 import java.util.jar.Manifest;
 
@@ -51,15 +45,10 @@ import org.apache.maven.project.MavenProjectHelper;
 import org.apache.maven.shared.filtering.MavenFileFilter;
 import org.apache.maven.shared.filtering.MavenFilteringException;
 import org.apache.maven.shared.filtering.MavenResourcesFiltering;
+import org.codehaus.plexus.PlexusContainer;
 import org.codehaus.plexus.logging.AbstractLogEnabled;
 import org.codehaus.plexus.util.ReaderFactory;
 import org.codehaus.plexus.util.StringUtils;
-import org.sonatype.aether.RepositorySystem;
-import org.sonatype.aether.RepositorySystemSession;
-import org.sonatype.aether.artifact.Artifact;
-import org.sonatype.aether.repository.RemoteRepository;
-import org.sonatype.aether.resolution.ArtifactRequest;
-import org.sonatype.aether.resolution.ArtifactResult;
 import org.xml.sax.SAXException;
 
 import static org.apache.karaf.deployer.kar.KarArtifactInstaller.FEATURE_CLASSIFIER;
@@ -75,7 +64,6 @@ import static org.apache.karaf.deployer.kar.KarArtifactInstaller.FEATURE_CLASSIF
  * @description Generates the features XML file starting with an optional source feature.xml and adding
  * project dependencies as bundles and feature/car dependencies
  */
-@SuppressWarnings("unchecked")
 public class GenerateDescriptorMojo extends AbstractLogEnabled implements Mojo {
     private static final int BUNDLELIST_DEFAULT_STARTLEVEL = 25;
 
@@ -106,7 +94,14 @@ public class GenerateDescriptorMojo extends AbstractLogEnabled implements Mojo {
      * @parameter default-value="${project.build.directory}/feature/feature.xml"
      */
     private File outputFile;
-    
+
+    /**
+     * (wrapper) Exclude some artifacts from the generated feature.
+     *
+     * @parameter
+     */
+    private List<String> excludedArtifactIds = new ArrayList<String>();
+ 
     /**
      * @parameter default-value="${project.build.directory}/partialBundleList.xml"
      */
@@ -177,7 +172,7 @@ public class GenerateDescriptorMojo extends AbstractLogEnabled implements Mojo {
      * @parameter default-value="true"
      */
     private boolean includeTransitiveDependency;
-    
+
     /**
      * Flag indicating whether a Sling partial-bundlelist shall be created (<code>true</code>) or not (<code>false</code>).
      * <p/>
@@ -201,7 +196,7 @@ public class GenerateDescriptorMojo extends AbstractLogEnabled implements Mojo {
     /**
      * (wrapper) The maven project.
      *
-     * @parameter expression="${project}"
+     * @parameter default-value="${project}"
      * @required
      * @readonly
      */
@@ -217,39 +212,14 @@ public class GenerateDescriptorMojo extends AbstractLogEnabled implements Mojo {
     protected MavenProjectHelper projectHelper;
 
     /**
-     * The entry point to Aether, i.e. the component doing all the work.
+     * We can't autowire strongly typed RepositorySystem from Aether because it may be Sonatype (Maven 3.0.x)
+     * or Eclipse (Maven 3.1.x/3.2.x) implementation, so we switch to service locator.
      *
      * @component
      * @required
      * @readonly
      */
-    private RepositorySystem repoSystem;
-
-    /**
-     * The current repository/network configuration of Maven.
-     *
-     * @parameter default-value="${repositorySystemSession}"
-     * @required
-     * @readonly
-     */
-    private RepositorySystemSession repoSession;
-
-    /**
-     * The project's remote repositories to use for the resolution of project dependencies.
-     *
-     * @parameter default-value="${project.remoteProjectRepositories}"
-     * @readonly
-     */
-    private List<RemoteRepository> projectRepos;
-
-    /**
-     * The project's remote repositories to use for the resolution of plugins and their dependencies.
-     *
-     * @parameter default-value="${project.remotePluginRepositories}"
-     * @required
-     * @readonly
-     */
-    private List<RemoteRepository> pluginRepos;
+    private PlexusContainer container;
 
     /**
      * @component role="org.apache.maven.shared.filtering.MavenResourcesFiltering" role-hint="default"
@@ -259,7 +229,7 @@ public class GenerateDescriptorMojo extends AbstractLogEnabled implements Mojo {
     protected MavenResourcesFiltering mavenResourcesFiltering;
 
     /**
-     * @parameter expression="${session}"
+     * @parameter default-value="${session}"
      * @required
      * @readonly
      */
@@ -273,73 +243,80 @@ public class GenerateDescriptorMojo extends AbstractLogEnabled implements Mojo {
      */
     protected MavenFileFilter mavenFileFilter;
 
-    //dependencies we are interested in
-    protected Map<Artifact, String> localDependencies;
-    //log of what happened during search
+    // dependencies we are interested in
+    protected Map<?, String> localDependencies;
+
+    // log of what happened during search
     protected String treeListing;
 
-    //maven log
+    // an access layer for available Aether implementation
+    protected DependencyHelper dependencyHelper;
+
+    // maven log
     private Log log;
-    
+
     //map to access bundle descritors for an artifact after feature was generated
-    private Map<Artifact, Bundle> artifact2Bundle = new HashMap<Artifact, Bundle>();;
+    private Map<Object, Bundle> artifact2Bundle = new HashMap<Object, Bundle>();;
 
     public void execute() throws MojoExecutionException, MojoFailureException {
         try {
-            DependencyHelper dependencyHelper = new DependencyHelper(pluginRepos, projectRepos, repoSession, repoSystem);
-            dependencyHelper.getDependencies(project, includeTransitiveDependency);
+            this.dependencyHelper = DependencyHelperFactory.createDependencyHelper(this.container, this.project, this.session, getLog());
+            this.dependencyHelper.getDependencies(project, includeTransitiveDependency);
             this.localDependencies = dependencyHelper.getLocalDependencies();
             this.treeListing = dependencyHelper.getTreeListing();
             File dir = outputFile.getParentFile();
             if (dir.isDirectory() || dir.mkdirs()) {
-                {
-                    PrintStream out = new PrintStream(new FileOutputStream(outputFile));
-                    try {
-                        writeFeatures(out);
-                    } finally {
-                        out.close();
-                    }
-                    // now lets attach it
-                    projectHelper.attachArtifact(project, attachmentArtifactType, attachmentArtifactClassifier, outputFile);
+                PrintStream out = new PrintStream(new FileOutputStream(outputFile));
+                try {
+                    writeFeatures(out);
+                } finally {
+                    out.close();
                 }
-                if (createSlingPartialBundleList) {
-                    PrintStream out = new PrintStream(new FileOutputStream(partialBundleListOutputFile));
-                    try {
-                        writePartialBundleList(out);
-                    } finally {
-                        out.close();
-                    }
-                    project.getArtifact().setFile(partialBundleListOutputFile);
-                    /*projectHelper.attachArtifact(project, 
-                            "xml", 
-                            "bundlelist", partialBundleListOutputFile);*/
-                }
-
+                // now lets attach it
+                projectHelper.attachArtifact(project, attachmentArtifactType, attachmentArtifactClassifier, outputFile);
             } else {
                 throw new MojoExecutionException("Could not create directory for features file: " + dir);
             }
+            if (createSlingPartialBundleList) {
+                PrintStream out = new PrintStream(new FileOutputStream(partialBundleListOutputFile));
+                try {
+                    writePartialBundleList(out);
+                } finally {
+                    out.close();
+                }
+                project.getArtifact().setFile(partialBundleListOutputFile);
+                /*projectHelper.attachArtifact(project, 
+                        "xml", 
+                        "bundlelist", partialBundleListOutputFile);*/
+            }   
         } catch (Exception e) {
             getLogger().error(e.getMessage());
             throw new MojoExecutionException("Unable to create features.xml file: " + e, e);
         }
     }
-    
+
     private void writePartialBundleList(PrintStream out) throws ArtifactResolutionException, ArtifactNotFoundException,
             IOException, JAXBException, SAXException, ParserConfigurationException, XMLStreamException, MojoExecutionException {
         getLogger().info("Creating Sling partial Bundlelist");
         out.println("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
         out.println("<bundles>");
         
-        for (Map.Entry<Artifact, String> entry : localDependencies.entrySet()) {
-            Artifact artifact = entry.getKey();
+        for (Map.Entry<?, String> entry : localDependencies.entrySet()) {
+            Object artifact = entry.getKey();
             Bundle bundle = artifact2Bundle.get(artifact);
             int bundleStartLevel = bundle.getStartLevel() == 0 ? BUNDLELIST_DEFAULT_STARTLEVEL : bundle.getStartLevel();
+            String location = bundle.getLocation();
+            if (!location.startsWith("mvn:")) {
+                continue;
+            }
+            String path = location.split(":")[1];
+            String parts[] = path.split(("/"));
             out.println("  <startLevel level=\""+bundleStartLevel+"\">");
             
             out.println("  <bundle>");
-            out.println("      <groupId>"+artifact.getGroupId()+"</groupId>");
-            out.println("      <artifactId>"+artifact.getArtifactId()+"</artifactId>");
-            out.println("      <version>"+artifact.getVersion()+"</version>");
+            out.println("      <groupId>"+parts[0]+"</groupId>");
+            out.println("      <artifactId>"+parts[1]+"</artifactId>");
+            out.println("      <version>"+parts[2]+"</version>");
             out.println("      <classifier></classifier>");
             out.println("    </bundle>");
             out.println("  </startLevel>");
@@ -391,11 +368,16 @@ public class GenerateDescriptorMojo extends AbstractLogEnabled implements Mojo {
         if (project.getDescription() != null && feature.getDetails() == null) {
             feature.setDetails(project.getDescription());
         }
-        for (Map.Entry<Artifact, String> entry : localDependencies.entrySet()) {
-            Artifact artifact = entry.getKey();
-            if (DependencyHelper.isFeature(artifact)) {
-                if (aggregateFeatures && FEATURE_CLASSIFIER.equals(artifact.getClassifier())) {
-                    File featuresFile = resolve(artifact);
+        for (Map.Entry<?, String> entry : localDependencies.entrySet()) {
+            Object artifact = entry.getKey();
+
+            if (excludedArtifactIds.contains(this.dependencyHelper.getArtifactId(artifact))) {
+                continue;
+            }
+
+            if (this.dependencyHelper.isArtifactAFeature(artifact)) {
+                if (aggregateFeatures && FEATURE_CLASSIFIER.equals(this.dependencyHelper.getClassifier(artifact))) {
+                    File featuresFile = this.dependencyHelper.resolve(artifact, getLog());
                     if (featuresFile == null || !featuresFile.exists()) {
                         throw new MojoExecutionException("Cannot locate file for feature: " + artifact + " at " + featuresFile);
                     }
@@ -404,8 +386,8 @@ public class GenerateDescriptorMojo extends AbstractLogEnabled implements Mojo {
                     features.getFeature().addAll(includedFeatures.getFeature());
                 }
             } else if (addBundlesToPrimaryFeature) {
-                String bundleName = MavenUtil.artifactToMvn(artifact);
-                File bundleFile = resolve(artifact);
+                String bundleName = this.dependencyHelper.artifactToMvn(artifact);
+                File bundleFile = this.dependencyHelper.resolve(artifact, getLog());
                 Manifest manifest = getManifest(bundleFile);
 
                 if (manifest == null || !ManifestUtils.isBundle(getManifest(bundleFile))) {
@@ -467,6 +449,7 @@ public class GenerateDescriptorMojo extends AbstractLogEnabled implements Mojo {
             if (m == null) {
                 getLogger().warn("Manifest not present in the first entry of the zip - " + file.getName());
             }
+            jar.close();
             return m;
         } finally {
             if (is != null) { // just in case when we did not open bundle
@@ -475,27 +458,6 @@ public class GenerateDescriptorMojo extends AbstractLogEnabled implements Mojo {
         }
     }
 
-    private File resolve(Artifact artifact) {
-        ArtifactRequest request = new ArtifactRequest();
-        request.setArtifact(artifact);
-        request.setRepositories(projectRepos);
-
-        getLog().debug("Resolving artifact " + artifact +
-                " from " + projectRepos);
-
-        ArtifactResult result;
-        try {
-            result = repoSystem.resolveArtifact(repoSession, request);
-        } catch (org.sonatype.aether.resolution.ArtifactResolutionException e) {
-            getLog().warn("could not resolve " + artifact, e);
-            return null;
-        }
-
-        getLog().debug("Resolved artifact " + artifact + " to " +
-                result.getArtifact().getFile() + " from "
-                + result.getRepository());
-        return result.getArtifact().getFile();
-    }
 
 
     private Features readFeaturesFile(File featuresFile) throws XMLStreamException, JAXBException, IOException {
@@ -581,7 +543,7 @@ public class GenerateDescriptorMojo extends AbstractLogEnabled implements Mojo {
     /**
      * The character encoding scheme to be applied when filtering resources.
      *
-     * @parameter expression="${encoding}" default-value="${project.build.sourceEncoding}"
+     * @parameter default-value="${project.build.sourceEncoding}"
      */
     protected String encoding;
 
@@ -589,7 +551,7 @@ public class GenerateDescriptorMojo extends AbstractLogEnabled implements Mojo {
      * Expression preceded with the String won't be interpolated
      * \${foo} will be replaced with ${foo}
      *
-     * @parameter expression="${maven.resources.escapeString}"
+     * @parameter default-value="${maven.resources.escapeString}"
      */
     protected String escapeString = "\\";
 
@@ -599,8 +561,6 @@ public class GenerateDescriptorMojo extends AbstractLogEnabled implements Mojo {
      * @parameter
      */
     protected Map<String, String> systemProperties;
-
-    private Map<String, String> previousSystemProperties;
 
     private void checkChanges(Features newFeatures, ObjectFactory objectFactory) throws Exception, IOException, JAXBException, XMLStreamException {
         if (checkDependencyChange) {
@@ -760,7 +720,8 @@ public class GenerateDescriptorMojo extends AbstractLogEnabled implements Mojo {
                                 + ", i.e. build is platform dependent!");
             }
             targetFile.getParentFile().mkdirs();
-            List filters = mavenFileFilter.getDefaultFilterWrappers(project, null, true, session, null);
+            @SuppressWarnings("rawtypes")
+			List filters = mavenFileFilter.getDefaultFilterWrappers(project, null, true, session, null);
             mavenFileFilter.copyFile(sourceFile, targetFile, true, filters, encoding, true);
         } catch (MavenFilteringException e) {
             throw new MojoExecutionException(e.getMessage(), e);

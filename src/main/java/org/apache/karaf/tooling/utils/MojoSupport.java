@@ -17,31 +17,30 @@
  */
 package org.apache.karaf.tooling.utils;
 
+import java.io.BufferedOutputStream;
+import java.io.Closeable;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URL;
-import java.net.URLClassLoader;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
-import org.apache.karaf.tooling.features.Node;
-import org.apache.karaf.tooling.features.ResolutionListenerImpl;
 import org.apache.maven.artifact.Artifact;
 import org.apache.maven.artifact.factory.ArtifactFactory;
 import org.apache.maven.artifact.metadata.ArtifactMetadataSource;
 import org.apache.maven.artifact.repository.ArtifactRepository;
 import org.apache.maven.artifact.repository.DefaultArtifactRepository;
 import org.apache.maven.artifact.repository.layout.DefaultRepositoryLayout;
-import org.apache.maven.artifact.resolver.ArtifactCollector;
-import org.apache.maven.artifact.resolver.ArtifactResolutionException;
 import org.apache.maven.artifact.resolver.ArtifactResolver;
 import org.apache.maven.artifact.versioning.InvalidVersionSpecificationException;
 import org.apache.maven.artifact.versioning.VersionRange;
+import org.apache.maven.execution.MavenSession;
 import org.apache.maven.model.Dependency;
 import org.apache.maven.model.DependencyManagement;
 import org.apache.maven.plugin.AbstractMojo;
@@ -50,7 +49,10 @@ import org.apache.maven.project.MavenProject;
 import org.apache.maven.project.MavenProjectBuilder;
 import org.apache.maven.project.MavenProjectHelper;
 import org.apache.maven.project.ProjectBuildingException;
+import org.apache.maven.settings.Proxy;
+import org.codehaus.plexus.PlexusContainer;
 
+@SuppressWarnings({"deprecation", "rawtypes", "unchecked"})
 public abstract class MojoSupport extends AbstractMojo {
 
     /**
@@ -63,7 +65,7 @@ public abstract class MojoSupport extends AbstractMojo {
     /**
      * The Maven project.
      *
-     * @parameter expression="${project}"
+     * @parameter default-value="${project}"
      * @required
      * @readonly
      */
@@ -72,7 +74,7 @@ public abstract class MojoSupport extends AbstractMojo {
     /**
      * Directory that resources are copied to during the build.
      *
-     * @parameter expression="${project.build.directory}/${project.artifactId}-${project.version}-installer"
+     * @parameter default-value="${project.build.directory}/${project.artifactId}-${project.version}-installer"
      * @required
      */
     protected File workDirectory;
@@ -113,6 +115,27 @@ public abstract class MojoSupport extends AbstractMojo {
      * @parameter default-value="xml"
      */
     private String featureArtifactType = "xml";
+    
+    /**
+     * The Maven session.
+     * 
+     * @parameter default-value="${session}"
+     * @readonly
+     * @required
+     */
+    protected MavenSession mavenSession;
+
+    /**
+     * <p>We can't autowire strongly typed RepositorySystem from Aether because it may be Sonatype (Maven 3.0.x)
+     * or Eclipse (Maven 3.1.x/3.2.x) version, so we switch to service locator by autowiring entire {@link PlexusContainer}</p>
+     *
+     * <p>It's a bit of a hack but we have not choice when we want to be usable both in Maven 3.0.x and 3.1.x/3.2.x</p>
+     *
+     * @component
+     * @required
+     * @readonly
+     */
+    protected PlexusContainer container;
 
     protected MavenProject getProject() {
         return project;
@@ -124,82 +147,6 @@ public abstract class MojoSupport extends AbstractMojo {
 
     public MavenProjectHelper getProjectHelper() {
         return projectHelper;
-    }
-
-    protected void removeBranch(ResolutionListenerImpl listener,
-            Artifact artifact) {
-        Node n = listener.getNode(artifact);
-        if (n != null) {
-            for (Iterator it = n.getParents().iterator(); it.hasNext();) {
-                Node parent = (Node) it.next();
-                parent.getChildren().remove(n);
-            }
-        }
-    }
-
-    protected void removeChildren(ResolutionListenerImpl listener,
-            Artifact artifact) {
-        Node n = listener.getNode(artifact);
-        n.getChildren().clear();
-    }
-
-    protected Set getArtifacts(Node n, Set s) {
-        if (!s.contains(n.getArtifact())) {
-            s.add(n.getArtifact());
-            for (Iterator iter = n.getChildren().iterator(); iter.hasNext();) {
-                Node c = (Node) iter.next();
-                getArtifacts(c, s);
-            }
-        }
-        return s;
-    }
-
-    protected void excludeBranch(Node n, Set excludes) {
-        excludes.add(n);
-        for (Iterator iter = n.getChildren().iterator(); iter.hasNext();) {
-            Node c = (Node) iter.next();
-            excludeBranch(c, excludes);
-        }
-    }
-
-    protected void print(Node rootNode) {
-        for (Iterator iter = getArtifacts(rootNode, new HashSet()).iterator(); iter.hasNext();) {
-            Artifact a = (Artifact) iter.next();
-            getLog().info(" " + a);
-        }
-    }
-
-    protected Set retainArtifacts(Set includes, ResolutionListenerImpl listener) {
-        Set finalIncludes = new HashSet();
-        Set filteredArtifacts = getArtifacts(listener.getRootNode(),
-                new HashSet());
-        for (Iterator iter = includes.iterator(); iter.hasNext();) {
-            Artifact artifact = (Artifact) iter.next();
-            for (Iterator iter2 = filteredArtifacts.iterator(); iter2.hasNext();) {
-                Artifact filteredArtifact = (Artifact) iter2.next();
-                if (filteredArtifact.getArtifactId().equals(
-                        artifact.getArtifactId())
-                        && filteredArtifact.getType()
-                                .equals(artifact.getType())
-                        && filteredArtifact.getGroupId().equals(
-                                artifact.getGroupId())) {
-                    if (!filteredArtifact.getVersion().equals(
-                            artifact.getVersion())) {
-                        getLog()
-                                .warn(
-                                        "Resolved artifact "
-                                                + artifact
-                                                + " has a different version from that in dependency management "
-                                                + filteredArtifact
-                                                + ", overriding dependency management");
-                    }
-                    finalIncludes.add(artifact);
-                }
-            }
-
-        }
-
-        return finalIncludes;
     }
 
     protected Map createManagedVersionMap(String projectId,
@@ -231,44 +178,6 @@ public abstract class MojoSupport extends AbstractMojo {
             map = Collections.EMPTY_MAP;
         }
         return map;
-    }
-
-    /**
-     * Set up a classloader for the execution of the main class.
-     *
-     * @return
-     * @throws MojoExecutionException
-     */
-    protected URLClassLoader getClassLoader() throws MojoExecutionException {
-        try {
-            Set urls = new HashSet();
-
-            URL mainClasses = new File(project.getBuild().getOutputDirectory())
-                    .toURL();
-            getLog().debug("Adding to classpath : " + mainClasses);
-            urls.add(mainClasses);
-
-            URL testClasses = new File(project.getBuild()
-                    .getTestOutputDirectory()).toURL();
-            getLog().debug("Adding to classpath : " + testClasses);
-            urls.add(testClasses);
-
-            Set dependencies = project.getArtifacts();
-            Iterator iter = dependencies.iterator();
-            while (iter.hasNext()) {
-                Artifact classPathElement = (Artifact) iter.next();
-                getLog().debug(
-                        "Adding artifact: " + classPathElement.getFile()
-                                + " to classpath");
-                urls.add(classPathElement.getFile().toURL());
-            }
-            URLClassLoader appClassloader = new URLClassLoader((URL[]) urls
-                    .toArray(new URL[urls.size()]), this.getClass().getClassLoader());
-            return appClassloader;
-        } catch (MalformedURLException e) {
-            throw new MojoExecutionException(
-                    "Error during setting up classpath", e);
-        }
     }
     
     protected String translateFromMaven(String uri) {
@@ -386,6 +295,10 @@ public abstract class MojoSupport extends AbstractMojo {
                     repoUrl,
                     repoUrl,
                     new DefaultRepositoryLayout());
+            org.apache.maven.repository.Proxy mavenProxy = configureProxyToInlineRepo();
+            if (mavenProxy != null) {
+                repo.setProxy(mavenProxy);
+            }
             resourceLocation = resourceLocation.substring(repoDelimIntex + 1);
 
         }
@@ -420,5 +333,76 @@ public abstract class MojoSupport extends AbstractMojo {
         Artifact artifact = factory.createArtifactWithClassifier(groupId, artifactId, version, type, classifier);
         artifact.setRepository(repo);
         return artifact;
+    }
+    
+    private org.apache.maven.repository.Proxy configureProxyToInlineRepo() {
+        if (mavenSession != null && mavenSession.getSettings() != null) {
+            Proxy proxy = mavenSession.getSettings().getActiveProxy();
+            org.apache.maven.repository.Proxy mavenProxy = new org.apache.maven.repository.Proxy();
+            if (proxy != null) {
+                mavenProxy.setProtocol(proxy.getProtocol());
+                mavenProxy.setHost(proxy.getHost());
+                mavenProxy.setPort(proxy.getPort());
+                mavenProxy.setNonProxyHosts(proxy.getNonProxyHosts());
+                mavenProxy.setUserName(proxy.getUsername());
+                mavenProxy.setPassword(proxy.getPassword());
+                return mavenProxy;
+            } else {
+                return null;
+            }
+            
+        } else {
+            return null;
+        }
+    }
+
+    protected void silentClose(Closeable closeable) {
+        if (closeable != null) {
+            try {
+                closeable.close();
+            } catch (IOException e) {
+                // Ignore
+            }
+        }
+    }
+    
+    protected void copy(File sourceFile, File destFile) {
+        File targetDir = destFile.getParentFile();
+        ensureDirExists(targetDir);
+
+        FileInputStream is = null;
+        BufferedOutputStream bos = null;
+        try {
+            is = new FileInputStream(sourceFile);
+            bos = new BufferedOutputStream(new FileOutputStream(destFile));
+            int count = 0;
+            byte[] buffer = new byte[8192];
+            while ((count = is.read(buffer)) > 0) {
+                bos.write(buffer, 0, count);
+            }
+            bos.close();
+        } catch (IOException e) {
+            throw new RuntimeException(e.getMessage(), e);
+        } finally {
+            silentClose(is);
+            silentClose(bos);
+        }
+    }
+    
+
+    /**
+     * Make sure the target directory exists and
+     * that is actually a directory
+     * @param targetDir
+     * @throws IOException
+     */
+    private static void ensureDirExists(File targetDir) {
+        if (!targetDir.exists()) {
+            if (!targetDir.mkdirs()) {
+                throw new RuntimeException("Unable to create target directory: " + targetDir);
+            }
+        } else if (!targetDir.isDirectory()) {
+            throw new RuntimeException("Target is not a directory: " + targetDir);
+        }
     }
 }

@@ -18,16 +18,12 @@
  */
 package org.apache.karaf.tooling.features;
 
-import static java.lang.String.format;
-
-import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.lang.reflect.Field;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -37,7 +33,6 @@ import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
 import java.util.ListIterator;
-import java.util.Map;
 import java.util.Set;
 
 import javax.xml.bind.JAXBException;
@@ -58,13 +53,6 @@ import org.apache.maven.artifact.Artifact;
 import org.apache.maven.artifact.repository.layout.DefaultRepositoryLayout;
 import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugin.MojoFailureException;
-import org.sonatype.aether.RepositorySystem;
-import org.sonatype.aether.RepositorySystemSession;
-import org.sonatype.aether.repository.RemoteRepository;
-import org.sonatype.aether.resolution.ArtifactRequest;
-import org.sonatype.aether.resolution.ArtifactResolutionException;
-import org.sonatype.aether.resolution.ArtifactResult;
-import org.sonatype.aether.util.artifact.DefaultArtifact;
 
 /**
  * Installs kar dependencies into a server-under-construction in target/assembly
@@ -78,17 +66,17 @@ import org.sonatype.aether.util.artifact.DefaultArtifact;
 public class InstallKarsMojo extends MojoSupport {
 
     /**
-     * Directory that resources are copied to during the build.
+     * Base directory used to copy the resources during the build (working directory).
      *
-     * @parameter expression="${project.build.directory}/assembly"
+     * @parameter default-value="${project.build.directory}/assembly"
      * @required
      */
     protected String workDirectory;
 
     /**
-     * features config file.
+     * Features configuration file (etc/org.apache.karaf.features.cfg).
      *
-     * @parameter expression="${project.build.directory}/assembly/etc/org.apache.karaf.features.cfg"
+     * @parameter default-value="${project.build.directory}/assembly/etc/org.apache.karaf.features.cfg"
      * @required
      */
     protected File featuresCfgFile;
@@ -96,13 +84,13 @@ public class InstallKarsMojo extends MojoSupport {
     /**
      * startup.properties file.
      *
-     * @parameter expression="${project.build.directory}/assembly/etc/startup.properties"
+     * @parameter default-value="${project.build.directory}/assembly/etc/startup.properties"
      * @required
      */
     protected File startupPropertiesFile;
 
     /**
-     * default start level for bundles in features that dont' specify it
+     * default start level for bundles in features that don't specify it.
      *
      * @parameter
      */
@@ -115,9 +103,9 @@ public class InstallKarsMojo extends MojoSupport {
     protected boolean dontAddToStartup;
 
     /**
-     * Directory that resources are copied to during the build.
+     * Directory used during build to construction the Karaf system repository.
      *
-     * @parameter expression="${project.build.directory}/assembly/system"
+     * @parameter default-value="${project.build.directory}/assembly/system"
      * @required
      */
     protected File systemDirectory;
@@ -143,30 +131,6 @@ public class InstallKarsMojo extends MojoSupport {
      */
     private List<String> installedFeatures;
 
-    // Aether support
-    /**
-     * The entry point to Aether, i.e. the component doing all the work.
-     *
-     * @component
-     */
-    private RepositorySystem repoSystem;
-
-    /**
-     * The current repository/network configuration of Maven.
-     *
-     * @parameter default-value="${repositorySystemSession}"
-     * @readonly
-     */
-    private RepositorySystemSession repoSession;
-
-    /**
-     * The project's remote repositories to use for the resolution of plugins and their dependencies.
-     *
-     * @parameter default-value="${project.remoteProjectRepositories}"
-     * @readonly
-     */
-    private List<RemoteRepository> remoteRepos;
-
     /**
      * When a feature depends on another feature, try to find it in another referenced feature-file and install that one
      * too.
@@ -176,17 +140,22 @@ public class InstallKarsMojo extends MojoSupport {
     private boolean addTransitiveFeatures = true;
 
     private URI system;
-    private CommentProperties startupProperties = new CommentProperties();
+    private Properties startupProperties = new Properties();
     private Set<Feature> featureSet = new HashSet<Feature>();
     private List<Dependency> missingDependencies = new ArrayList<Dependency>();
+
+    // an access layer for available Aether implementation
+    protected DependencyHelper dependencyHelper;
 
     /**
      * list of features to  install into local repo.
      */
     private List<Feature> localRepoFeatures = new ArrayList<Feature>();
 
+    @SuppressWarnings("deprecation")
     @Override
     public void execute() throws MojoExecutionException, MojoFailureException {
+        this.dependencyHelper = DependencyHelperFactory.createDependencyHelper(this.container, this.project, this.mavenSession, getLog());
         systemDirectory.mkdirs();
         system = systemDirectory.toURI();
         if (startupPropertiesFile.exists()) {
@@ -211,7 +180,6 @@ public class InstallKarsMojo extends MojoSupport {
 
         Collection<Artifact> dependencies = project.getDependencyArtifacts();
         StringBuilder buf = new StringBuilder();
-        byte[] buffer = new byte[4096];
         for (Artifact artifact : dependencies) {
             dontAddToStartup = "runtime".equals(artifact.getScope());
             if ("kar".equals(artifact.getType()) && acceptScope(artifact)) {
@@ -230,7 +198,7 @@ public class InstallKarsMojo extends MojoSupport {
                 }
             }
             if ("features".equals(artifact.getClassifier()) && acceptScope(artifact)) {
-                String uri = MavenUtil.artifactToMvn(artifact);
+                String uri = this.dependencyHelper.artifactToMvn(artifact);
 
                 File source = artifact.getFile();
                 DefaultRepositoryLayout layout = new DefaultRepositoryLayout();
@@ -242,14 +210,8 @@ public class InstallKarsMojo extends MojoSupport {
                 if (!target.exists()) {
                     target.getParentFile().mkdirs();
                     try {
-                        InputStream is = new FileInputStream(source);
-                        BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(target));
-                        int count = 0;
-                        while ((count = is.read(buffer)) > 0) {
-                            bos.write(buffer, 0, count);
-                        }
-                        bos.close();
-                    } catch (IOException e) {
+                        copy(source, target);
+                    } catch (RuntimeException e) {
                         getLog().error("Could not copy features " + uri + " from source file " + source, e);
                     }
 
@@ -276,13 +238,13 @@ public class InstallKarsMojo extends MojoSupport {
         }
 
         // install bundles listed in startup properties that weren't in kars into the system dir
-        Set keySet = startupProperties.keySet();
+        Set<?> keySet = startupProperties.keySet();
         for (Object keyObject : keySet) {
             String key = (String) keyObject;
-            String path = MavenUtil.pathFromMaven(key);
+            String path = this.dependencyHelper.pathFromMaven(key);
             File target = new File(system.resolve(path));
             if (!target.exists()) {
-                install(buffer, key, target);
+                install(key, target);
             }
         }
 
@@ -291,16 +253,20 @@ public class InstallKarsMojo extends MojoSupport {
             for (Bundle bundle : feature.getBundle()) {
                 if (!bundle.isDependency()) {
                     String key = bundle.getLocation();
-                    String path = MavenUtil.pathFromMaven(key);
+                    // remove wrap: protocol to resolve from maven
+                    if (key.startsWith("wrap:")) {
+                        key = key.substring(5);
+                    }
+                    String path = this.dependencyHelper.pathFromMaven(key);
                     File test = new File(system.resolve(path));
                     if (!test.exists()) {
                         File target = new File(system.resolve(path));
                         if (!target.exists()) {
-                            install(buffer, key, target);
-                            Artifact artifact = MavenUtil.mvnToArtifact(key);
+                            install(key, target);
+                            Artifact artifact = this.dependencyHelper.mvnToArtifact(key);
                             if (artifact.isSnapshot()) {
                                 // generate maven-metadata-local.xml for the artifact
-                                File metadataSource = new File(resolve(key).getParentFile(), "maven-metadata-local.xml");
+                                File metadataSource = new File(this.dependencyHelper.resolveById(key, getLog()).getParentFile(), "maven-metadata-local.xml");
                                 File metadataTarget = new File(target.getParentFile(), "maven-metadata-local.xml");
                                 metadataTarget.getParentFile().mkdirs();
                                 try {
@@ -309,7 +275,7 @@ public class InstallKarsMojo extends MojoSupport {
                                         MavenUtil.generateMavenMetadata(artifact, metadataTarget);
                                     } else {
                                         // copy the metadata to the target
-                                        copy(buffer, metadataSource, metadataTarget);
+                                        copy(metadataSource, metadataTarget);
                                     }
                                 } catch (IOException ioException) {
                                     getLog().warn(ioException);
@@ -337,52 +303,14 @@ public class InstallKarsMojo extends MojoSupport {
         }
     }
 
-    private void install(byte[] buffer, String key, File target) throws MojoFailureException {
-        File source = resolve(key);
+    private void install(String key, File target) throws MojoFailureException {
+        File source = this.dependencyHelper.resolveById(key, getLog());
         target.getParentFile().mkdirs();
-        try {
-            copy(buffer, source, target);
-        } catch (IOException e) {
-            getLog().error("Could not copy bundle " + key, e);
-        }
-    }
-    
-    private void copy(byte[] buffer, File source, File target) throws IOException {
-        target.getParentFile().mkdirs();
-        InputStream is = new FileInputStream(source);
-        BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(target));
-        int count = 0;
-        while ((count = is.read(buffer)) > 0) {
-            bos.write(buffer, 0, count);
-        }
-        bos.close();      
+        copy(source, target);
     }
 
     private boolean acceptScope(Artifact artifact) {
         return "compile".equals(artifact.getScope()) || "runtime".equals(artifact.getScope());
-    }
-
-    public File resolve(String id) throws MojoFailureException {
-        id = MavenUtil.mvnToAether(id);
-        ArtifactRequest request = new ArtifactRequest();
-        request.setArtifact(new DefaultArtifact(id));
-        request.setRepositories(remoteRepos);
-
-        getLog().debug("Resolving artifact " + id +
-                " from " + remoteRepos);
-
-        ArtifactResult result;
-        try {
-            result = repoSystem.resolveArtifact(repoSession, request);
-        } catch (ArtifactResolutionException e) {
-            getLog().warn("could not resolve " + id, e);
-            throw new MojoFailureException(format("Couldn't resolve artifact %s", id), e);
-        }
-
-        getLog().debug("Resolved artifact " + id + " to " +
-                result.getArtifact().getFile() + " from "
-                + result.getRepository());
-        return result.getArtifact().getFile();
     }
 
     private class OfflineFeaturesService implements FeaturesService {
@@ -411,6 +339,28 @@ public class InstallKarsMojo extends MojoSupport {
                         properties.put(FEATURES_REPOSITORIES, existingFeatureRepos);
                     }
                     Features repo = readFeatures(uri);
+                    for (String innerRepository : repo.getRepository()) {
+                        String innerRepositoryPath = dependencyHelper.pathFromMaven(innerRepository);
+                        File innerRepositoryTargetInSystemRepository = new File(system.resolve(innerRepositoryPath));
+                        if (!innerRepositoryTargetInSystemRepository.exists()) {
+                            File innerRepositorySourceFile = dependencyHelper.resolveById(innerRepository, getLog());
+                            innerRepositoryTargetInSystemRepository.getParentFile().mkdirs();
+                            copy(innerRepositorySourceFile, innerRepositoryTargetInSystemRepository);
+
+                            // add metadata for snapshot
+                            Artifact innerRepositoryArtifact = dependencyHelper.mvnToArtifact(innerRepository);
+                            if (innerRepositoryArtifact.isSnapshot()) {
+                                getLog().debug("Feature repository " + innerRepository + " is a SNAPSHOT, generate the maven-metadata-local.xml file");
+                                File metadataTarget = new File(innerRepositoryTargetInSystemRepository.getParentFile(), "maven-metadata-local.xml");
+                                try {
+                                    MavenUtil.generateMavenMetadata(innerRepositoryArtifact, metadataTarget);
+                                } catch (Exception e) {
+                                    getLog().warn("Could not create maven-metadata-local.xml", e);
+                                    getLog().warn("It means that this SNAPSHOT could be overwritten by an older one present on remote repositories");
+                                }
+                            }
+                        }
+                    }
                     for (Feature feature : repo.getFeature()) {
                         featureSet.add(feature);
                         if (startupFeatures != null && startupFeatures.contains(feature.getName())) {
@@ -473,13 +423,14 @@ public class InstallKarsMojo extends MojoSupport {
         }
 
         private String retrieveProperty(Properties properties, String key) {
-            return properties.containsKey(key) && properties.get(key) != null ?  properties.get(key) + "," : "";
+            String val = properties.getProperty(key);
+            return val != null && val.length() > 0 ? val + "," : "";
         }
 
-        private Features readFeatures(URI uri) throws XMLStreamException, JAXBException, IOException {
+        private Features readFeatures(URI uri) throws MojoExecutionException, XMLStreamException, JAXBException, IOException {
             File repoFile;
             if (uri.toString().startsWith("mvn:")) {
-                URI featuresPath = system.resolve(MavenUtil.pathFromMaven(uri.toString()));
+                URI featuresPath = system.resolve(dependencyHelper.pathFromMaven(uri.toString()));
                 repoFile = new File(featuresPath);
             } else {
                 repoFile = new File(uri);
@@ -534,7 +485,7 @@ public class InstallKarsMojo extends MojoSupport {
                 String location = bundle.getLocation();
                 String startLevel = Integer.toString(bundle.getStartLevel() == 0 ? defaultStartLevel : bundle.getStartLevel());
                 if (startupProperties.containsKey(location)) {
-                    int oldStartLevel = Integer.decode((String)startupProperties.get(location));
+                    int oldStartLevel = Integer.decode((String) startupProperties.get(location));
                     if (oldStartLevel > bundle.getStartLevel()) {
                         startupProperties.put(location, startLevel);
                     }
@@ -567,7 +518,7 @@ public class InstallKarsMojo extends MojoSupport {
 
         @Override
         public void installFeatures(Set<org.apache.karaf.features.Feature> features, EnumSet<Option> options)
-            throws Exception {
+                throws Exception {
         }
 
         @Override
@@ -575,7 +526,15 @@ public class InstallKarsMojo extends MojoSupport {
         }
 
         @Override
+        public void uninstallFeature(String name, EnumSet<Option> options) {
+        }
+
+        @Override
         public void uninstallFeature(String name, String version) throws Exception {
+        }
+
+        @Override
+        public void uninstallFeature(String name, String version, EnumSet<Option> options) {
         }
 
         @Override
@@ -608,83 +567,12 @@ public class InstallKarsMojo extends MojoSupport {
             // TODO Auto-generated method stub
             return null;
         }
-    }
 
-    // when FELIX-2887 is ready we can use plain Properties again
-    private static class CommentProperties extends Properties {
+        @Override
+        public void refreshRepository(URI uri) throws Exception {
+            // TODO Auto-generated method stub
 
-        private Map<String, Layout> layout;
-        private Map<String, String> storage;
-
-        public CommentProperties() {
-            layout = (Map<String, Layout>) getField("layout");
-            storage = (Map<String, String>) getField("storage");
         }
-
-        private Object getField(String fieldName) {
-            try {
-                Field l = Properties.class.getDeclaredField(fieldName);
-                boolean old = l.isAccessible();
-                l.setAccessible(true);
-                Object layout = l.get(this);
-                l.setAccessible(old);
-                return layout;
-            } catch (Exception e) {
-                throw new RuntimeException("Could not access field " + fieldName, e);
-            }
-        }
-
-        public String put(String key, String comment, String value) {
-            return put(key, Collections.singletonList(comment), value);
-        }
-
-        public List<String> getRaw(String key) {
-            if (layout.containsKey(key)) {
-                if (layout.get(key).getValueLines() != null) {
-                    return new ArrayList<String>(layout.get(key).getValueLines());
-                }
-            }
-            List<String> result = new ArrayList<String>();
-            if (storage.containsKey(key)) {
-                result.add(storage.get(key));
-            }
-            return result;
-        }
-
-        /**
-         * The list of possible key/value separators
-         */
-        private static final char[] SEPARATORS = new char[]{ '=', ':' };
-
-        /**
-         * The white space characters used as key/value separators.
-         */
-        private static final char[] WHITE_SPACE = new char[]{ ' ', '\t', '\f' };
-
-        /**
-         * Escape the separators in the key.
-         *
-         * @param key the key
-         * @return the escaped key
-         */
-        private static String escapeKey(String key) {
-            StringBuffer newkey = new StringBuffer();
-
-            for (int i = 0; i < key.length(); i++) {
-                char c = key.charAt(i);
-
-                if (contains(SEPARATORS, c) || contains(WHITE_SPACE, c)) {
-                    // escape the separator
-                    newkey.append('\\');
-                    newkey.append(c);
-                } else {
-                    newkey.append(c);
-                }
-            }
-
-            return newkey.toString();
-        }
-
     }
 
 }
