@@ -283,7 +283,7 @@
     
     <profiles>
 
--        <!-- START SNIPPET: release-profile -->
+       <!-- START SNIPPET: release-profile -->
 
         <profile>
 
